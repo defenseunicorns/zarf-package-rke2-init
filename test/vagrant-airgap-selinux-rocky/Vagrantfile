@@ -1,0 +1,42 @@
+# -*- mode: ruby -*-
+# vi: set ft=ruby :
+
+
+Vagrant.configure("2") do |config|
+  # Use a generic ubuntu vagrant box for now
+  config.vm.box = "generic/rocky8"
+
+  config.vm.synced_folder "./", "/vagrant", type: "rsync"
+
+  # Requires VAGRANT_EXPERIMENTAL="typed_triggers" to be set before running `vagrant up`
+  config.trigger.before :'VagrantPlugins::ProviderLibvirt::Action::StartDomain', type: :action do |trigger|
+    trigger.info = "Adding static IP to airgap-net"
+    trigger.run = {inline: 'bash -c "virsh net-update airgap-net add ip-dhcp-host \'<host mac=\"86:d9:8f:fc:f0:20\" ip=\"192.168.243.5\" />\' --live --config; exit 0"'}
+  end
+
+  config.vm.provider :libvirt do |libvirt|
+    # rke2 needs at least 2 cpus and 4GB of memory
+    libvirt.cpus = 4
+    libvirt.memory = 8192
+    # Use a separate network without forwarding to simulate airgap
+    libvirt.management_network_name = "airgap-net"
+    libvirt.management_network_address = "192.168.243.0/24"
+    libvirt.management_network_mode = "none"
+    libvirt.management_network_mac = "86:d9:8f:fc:f0:20"
+  end
+
+  config.vm.hostname = "rocky-selinux.local"
+
+
+  # TODO Refine provisioner
+  config.vm.provision "shell",
+    privileged: true,
+    env: {
+      "ZARF_CONFIG" => "/vagrant/zarf-config.toml",
+    },
+    inline: <<-SHELL
+      # When no nat forwarding is used, the default gateway is not set and that makes canal sad
+      ip route add default via 192.168.243.1
+      echo 'export PATH=$PATH:/vagrant' >> /root/.bashrc
+    SHELL
+end

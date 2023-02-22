@@ -1,0 +1,17 @@
+# Zarf
+zarf-*.zst
+zarf-sbom
+sha256:*
+provisioning/**/zarf
+zarf/*
+
+# Vagrant
+.vagrant
+test/*/zarf
+
+# Archives
+*.tar
+*.tar*
+
+# Package
+rke2/tmp

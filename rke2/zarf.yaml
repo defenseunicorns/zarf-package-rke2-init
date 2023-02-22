@@ -1,0 +1,196 @@
+kind: ZarfInitConfig
+metadata:
+  name: init-rke2
+  description: "Used to establish a new RKE2 Zarf cluster"
+  architecture: amd64  # arm64 not yet supported by RKE2.  Remove when it is.
+
+variables:
+  - name: FLANNEL_ADAPTER
+    default: eth0
+  - name: RKE2_ARGS
+    prompt: true
+    default: "--disable rke2-ingress-nginx"
+
+components:
+  # This package requires root access to install
+  - name: root-check
+    required: true
+    actions:
+      onDeploy:
+        before:
+          - cmd: if [ "$(id -u)" -ne 0 ]; then echo "Please run as root." >&2; exit 1; fi
+
+  # This package requires specific binaries to create and deploy
+  - name: binary-check
+    required: true
+    actions:
+      onCreate:
+        before:
+          - cmd: if ! command -v docker; then echo "Docker is required to build this package" >&2; exit 1; fi
+          - cmd: if ! command -v yq; then echo "yq is required to build this package" >&2; exit 1; fi
+          - cmd: if ! command -v zstd; then echo "yq is required to build this package" >&2; exit 1; fi
+          - cmd: if ! command -v bsdtar; then echo "yq is required to build this package" >&2; exit 1; fi
+      onDeploy:
+        before:
+          - cmd:  if ! command -v zarf; then echo "Please add zarf to your path" >&2; exit 1; fi
+
+  - name: rke2-canal-config
+    required: true
+    files:
+      # Places the canal helm config file to allow for the flannel adapter to be set
+      - source: files/rke2-canal-config.yaml
+        target: /var/lib/rancher/rke2/server/manifests/rke2-canal-config.yaml
+    actions:
+      onDeploy:
+        before:
+          - cmd: mkdir -p /var/lib/rancher/rke2/server/manifests
+
+  - name: rke2-network-requirements
+    required: true
+    files:
+      # Canal CNI Configuration to work properly with NetworkManager
+      - source: files/rke2-canal.conf
+        target: /tmp/rke2-canal.conf
+      # Script to configure firewall and network manager if applicable
+      - source: files/rke2-network-requirements.sh
+        target: /tmp/rke2-network-requirements.sh
+    actions:
+      onDeploy:
+        after:
+          - cmd: chmod +x /tmp/rke2-network-requirements.sh
+          - cmd: /tmp/rke2-network-requirements.sh
+
+  - name: rke2-install
+    required: true
+    files:
+      - source: https://github.com/rancher/rke2/releases/download/v1.26.1%2Brke2r1/rke2.linux-amd64.tar.gz
+        target: /tmp/rke2/base/rke2.linux-amd64.tar.gz
+      - source: https://github.com/rancher/rke2/releases/download/v1.26.1%2Brke2r1/sha256sum-amd64.txt
+        target: /tmp/rke2/base/sha256sum-amd64.txt
+      - source: https://github.com/rancher/rke2/releases/download/v1.26.1%2Brke2r1/rke2-images.linux-amd64.tar.zst
+        target: /tmp/rke2/base/rke2-images.linux-amd64.tar.zst
+      - source: https://get.rke2.io
+        target: /tmp/rke2/base/install.sh
+      # Add longhorn images archive so that rke2 imports it to cache
+      - source: files/longhorn_images.tar.zst
+        target: /var/lib/rancher/rke2/agent/images//longhorn_images.tar.zst
+    actions:
+      onCreate:
+        before:
+          # Download zarf repo to have access to the longhorn zarf yaml
+          - cmd: ../scripts/download-zarf-repo.sh ../zarf
+          # Use the longhorn zarf yaml to get list of longhorn images
+          - cmd: scripts/longhorn-images.sh
+      onDeploy:
+        before:
+          - cmd: mkdir -p /tmp/rke2/base
+          - cmd: mkdir -p /var/lib/rancher/rke2/agent/images/
+        after:
+          - cmd: chmod +x /tmp/rke2/base/install.sh
+          - cmd: sh /tmp/rke2/base/install.sh
+            env:
+              - "INSTALL_RKE2_ARTIFACT_PATH=/tmp/rke2/base"
+
+  # Very specific packages for rke2 selinux on rocky linux 8.7 - needs to be changed for better compatibility - airgaps are hard
+  - name: rke2-selinux-setup
+    required: false
+    files:
+      - source: https://rocky-linux-us-west1.production.gcp.mirrors.ctrliq.cloud/pub/rocky//8.7/BaseOS/x86_64/os/Packages/p/python3-audit-3.0.7-4.el8.x86_64.rpm
+        target: /tmp/rke2/selinux/python3-audit-3.0.7-4.el8.x86_64.rpm
+      - source: https://rocky-linux-us-west1.production.gcp.mirrors.ctrliq.cloud/pub/rocky//8.7/BaseOS/x86_64/os/Packages/p/python3-libsemanage-2.9-9.el8_6.x86_64.rpm
+        target: /tmp/rke2/selinux/python3-libsemanage-2.9-9.el8_6.x86_64.rpm
+      - source: https://rocky-linux-us-west1.production.gcp.mirrors.ctrliq.cloud/pub/rocky//8.7/BaseOS/x86_64/os/Packages/p/python3-setools-4.3.0-3.el8.x86_64.rpm
+        target: /tmp/rke2/selinux/python3-setools-4.3.0-3.el8.x86_64.rpm
+      - source: https://rocky-linux-us-west1.production.gcp.mirrors.ctrliq.cloud/pub/rocky//8.7/BaseOS/x86_64/os/Packages/p/python3-policycoreutils-2.9-20.el8.noarch.rpm
+        target: /tmp/rke2/selinux/python3-policycoreutils-2.9-20.el8.noarch.rpm
+      - source: https://rpm.rancher.io/rke2/latest/1.18/centos/8/x86_64/rke2-common-1.18.20~rke2r1-0.el8.x86_64.rpm
+        target: /tmp/rke2/selinux/rke2-common-1.18.20~rke2r1-0.el8.x86_64.rpm
+      - source: https://rocky-linux-us-west1.production.gcp.mirrors.ctrliq.cloud/pub/rocky//8.7/BaseOS/x86_64/os/Packages/p/policycoreutils-python-utils-2.9-20.el8.noarch.rpm
+        target: /tmp/rke2/selinux/policycoreutils-python-utils-2.9-20.el8.noarch.rpm
+      - source: https://rocky-linux-us-west1.production.gcp.mirrors.ctrliq.cloud/pub/rocky//8.7/BaseOS/x86_64/os/Packages/c/checkpolicy-2.9-1.el8.x86_64.rpm
+        target: /tmp/rke2/selinux/checkpolicy-2.9-1.el8.x86_64.rpm
+      - source: https://repo.uccs.edu/rocky-linux/8.7/AppStream/x86_64/os/Packages/c/container-selinux-2.189.0-1.module+el8.7.0+1122+04a7498b.noarch.rpm
+        target: /tmp/rke2/selinux/container-selinux-2.189.0-1.module+el8.7.0+1122+04a7498b.noarch.rpm
+      - source: https://rpm.rancher.io/rke2/latest/common/centos/8/noarch/rke2-selinux-0.11-1.el8.noarch.rpm
+        target: /tmp/rke2/selinux/rke2-selinux-0.11-1.el8.noarch.rpm
+    actions:
+      onDeploy:
+        before:
+          - cmd: mkdir -p /tmp/rke2/selinux
+        after:
+          - cmd: dnf install --disablerepo=* -y /tmp/rke2/selinux/*.rpm
+
+  # Very specific packages for longhorn on rocky linux 8.7 - needs to be changed for better compatibility - airgaps are hard
+  - name: longhorn-prerequisites
+    required: false
+    files:
+      - source: http://ash.mirrors.clouvider.net/rocky/8.7/BaseOS/x86_64/os/Packages/i/iscsi-initiator-utils-6.2.1.4-4.git095f59c.el8.x86_64.rpm
+        target: /tmp/rke2/longhorn/iscsi/iscsi-initiator-utils-6.2.1.4-4.git095f59c.el8.x86_64.rpm
+      - source: http://ash.mirrors.clouvider.net/rocky/8.7/BaseOS/x86_64/os/Packages/i/iscsi-initiator-utils-iscsiuio-6.2.1.4-4.git095f59c.el8.x86_64.rpm
+        target: /tmp/rke2/longhorn/iscsi/iscsi-initiator-utils-iscsiuio-6.2.1.4-4.git095f59c.el8.x86_64.rpm
+      - source: http://ash.mirrors.clouvider.net/rocky/8.7/BaseOS/x86_64/os/Packages/i/isns-utils-libs-0.99-1.el8.x86_64.rpm
+        target: /tmp/rke2/longhorn/iscsi/isns-utils-libs-0.99-1.el8.x86_64.rpm
+      - source: http://ash.mirrors.clouvider.net/rocky/8.7/BaseOS/x86_64/os/Packages/q/quota-nls-4.04-14.el8.noarch.rpm
+        target: /tmp/rke2/longhorn/nfs/quota-nls-4.04-14.el8.noarch.rpm
+      - source: https://mirrors.iu13.net/rocky/8.7/AppStream/x86_64/os/Packages/l/libverto-libev-0.3.2-2.el8.x86_64.rpm
+        target: /tmp/rke2/longhorn/nfs/libverto-libev-0.3.2-2.el8.x86_64.rpm
+      - source: http://ash.mirrors.clouvider.net/rocky/8.7/BaseOS/x86_64/os/Packages/k/keyutils-1.5.10-9.el8.x86_64.rpm
+        target: /tmp/rke2/longhorn/nfs/keyutils-1.5.10-9.el8.x86_64.rpm
+      - source: https://mirrors.iu13.net/rocky/8.7/AppStream/x86_64/os/Packages/l/libev-4.24-6.el8.x86_64.rpm
+        target: /tmp/rke2/longhorn/nfs/libev-4.24-6.el8.x86_64.rpm
+      - source: http://ash.mirrors.clouvider.net/rocky/8.7/BaseOS/x86_64/os/Packages/n/nfs-utils-2.3.3-57.el8.x86_64.rpm
+        target: /tmp/rke2/longhorn/nfs/nfs-utils-2.3.3-57.el8.x86_64.rpm
+      - source: http://ash.mirrors.clouvider.net/rocky/8.7/BaseOS/x86_64/os/Packages/g/gssproxy-0.8.0-21.el8.x86_64.rpm
+        target: /tmp/rke2/longhorn/nfs/gssproxy-0.8.0-21.el8.x86_64.rpm
+      - source: http://ash.mirrors.clouvider.net/rocky/8.7/BaseOS/x86_64/os/Packages/r/rpcbind-1.2.5-10.el8.x86_64.rpm
+        target: /tmp/rke2/longhorn/nfs/rpcbind-1.2.5-10.el8.x86_64.rpm
+      - source: http://ash.mirrors.clouvider.net/rocky/8.7/BaseOS/x86_64/os/Packages/p/python3-pyyaml-3.12-12.el8.x86_64.rpm
+        target: /tmp/rke2/longhorn/nfs/python3-pyyaml-3.12-12.el8.x86_64.rpm
+      - source: http://ash.mirrors.clouvider.net/rocky/8.7/BaseOS/x86_64/os/Packages/q/quota-4.04-14.el8.x86_64.rpm
+        target: /tmp/rke2/longhorn/nfs/quota-4.04-14.el8.x86_64.rpm
+    actions:
+      onDeploy:
+        before:
+          - cmd: mkdir -p /tmp/rke2/longhorn/iscsi
+          - cmd: mkdir -p /tmp/rke2/longhorn/nfs
+        after:
+          - cmd: dnf --setopt=tsflags=noscripts install --disablerepo=* -y /tmp/rke2/longhorn/iscsi/*.rpm
+          - cmd: echo "InitiatorName=$(/sbin/iscsi-iname)" > /etc/iscsi/initiatorname.iscsi
+          - cmd: systemctl enable iscsid
+          - cmd: systemctl start iscsid
+          - cmd: modprobe iscsi_tcp
+          - cmd: dnf install --disablerepo=* -y /tmp/rke2/longhorn/nfs/*.rpm
+
+  - name: start-rke2
+    required: true
+    files:
+      - source: files/rke2-server.service
+        target: /usr/local/lib/systemd/system/rke2-server.service
+    actions:
+      onDeploy:
+        after:
+          - cmd: "systemctl enable rke2-server"
+          - cmd: "systemctl start rke2-server"
+          - cmd: "echo 'export PATH=$PATH:/var/lib/rancher/rke2/bin' >> /etc/profile.d/rke2.sh"
+
+  - name: longhorn-yolo
+    required: true
+    files:
+      - source: files/zarf-package-longhorn.tar.zst
+        target: /tmp/rke2/longhorn/zarf-package-longhorn.tar.zst
+    actions:
+      onCreate:
+        before:
+          - cmd: rm -rf tmp
+          - cmd: mkdir -p tmp
+          - cmd: cp -r ../zarf/examples/longhorn tmp/longhorn
+          - cmd: yq -i '.metadata.yolo = true | .components[].images = [] | .components[].manifests = []' tmp/longhorn/zarf.yaml
+          - cmd: bash -c 'pushd tmp/longhorn; zarf package create --no-progress --confirm; popd'
+          - cmd: mv tmp/longhorn/zarf-package-longhorn-example-*.tar.zst files/zarf-package-longhorn.tar.zst
+          - cmd: rm -rf tmp
+      onDeploy:
+        after:
+          # Give rke2 some time to start up
+          - cmd: /var/lib/rancher/rke2/bin/kubectl wait --for=condition=Ready nodes --all
+          - cmd: sleep 30s
+          - cmd: zarf package deploy --no-progress --confirm /tmp/rke2/longhorn/zarf-package-longhorn.tar.zst
